@@ -1,0 +1,175 @@
+---
+title: "covid project"
+author: "Claire Morrison"
+date: "2/2/2022"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(stringr)
+library(readr)
+library(tidyr)
+library(lubridate)
+library(lme4)
+library(ggplot2)
+options(width = 100)
+```
+
+
+## Introduction:
+
+I am interested in population density and a potential difference in COVID-19 cases/deaths. There are a few factors that could play in: in more densely populated areas, transmission seems more likely, thus expected an increase in cases from sparse to densely populated areas. However, in more urban places, you would expect people might be more likely to have vaccines (given the more urbran lean of cities towards the progressive side of the political spectrum), so potentially the severity of cases (deaths) would be less. Finally the number of hospital beds in rual areas might be fewer per 1000 people, and therefore if cases are severe people might not be able to fully get the help they need to recover, leading to perhaps more deaths.
+
+Overall, I hypothesize more densely populated areas will have more cases but not more deaths than sparsely populated areas, scaled by population.
+
+
+**Data:**
+The COVID-19 data came from the New York Times publicly available via Github. It included 1,932 US counties with cases per day and dearths per day recorded daily from Jan 21 2020 to Feb 02 2022. I merged this with a population denisty dataset I downloaded from the US Census <https://covid19.census.gov/datasets/USCensus::average-household-size-and-population-density-county/explore?location=23.148887%2C0.315550%2C2.06&showTable=true>. However, I could not figure out how to get the link from that website to download via URL with read_csv, so I downlaoded it and uploaded it to my github so you could knit this file without having to read one in manually. Finally, I merged the data with a look up table that contained population so I could control for deaths and cases per population, as that seems important to distinguish when looking at densely vs sparsely populated areas.
+
+
+```{r get covid data, echo=T, message=F}
+dat <-
+  read_csv("https://raw.githubusercontent.com/nytimes/covid-19-data/master/us-counties.csv")
+
+deaths_by_county <- dat %>% group_by(county) %>%
+  mutate(total_deaths= sum(deaths),
+         total_cases= sum(cases)) %>% 
+    filter(date == max(date)) %>%
+  rename(GEOID= fips)
+
+```
+
+```{r add pop density data, echo=T, message=F}
+popdens<- read_csv("https://raw.githubusercontent.com/clairemo22/covid_project/main/Average_Household_Size_and_Population_Density_County.csv")
+
+popdens<- popdens %>% select(GEOID, B01001_calc_PopDensity) %>%
+  rename(pop_density=B01001_calc_PopDensity) %>%
+  mutate(urb_vs_rural= ifelse(pop_density<38, "rural", ifelse(pop_density>37, "urban", NA))) ### create a variable that codes urban vs rural classification as determined by a county having a population density < 38 people per square KM being rural. 
+```
+
+```{r add look up table, echo=T, message=F}
+uid_lookup_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv"
+
+
+uid <- read_csv(uid_lookup_url) %>%
+  select(-c(Lat, Long_, Combined_Key, code3, iso2, iso3, Admin2)) %>%
+  rename(GEOID=FIPS)
+```
+
+
+```{r merge all datasets, echo=T, message=F}
+US_pop<- deaths_by_county %>% left_join(popdens, x_names = GEOID, y_names=GEOID) 
+US_pop<- US_pop %>% left_join(uid, x_names = GEOID, y_names=GEOID) 
+```
+
+```{r look at data}
+US_pop$fatality_rate<- (US_pop$deaths/US_pop$cases)*100 ## fatality rate
+US_pop$cases_per_county<- (US_pop$cases/US_pop$Population)*100 ## cases per population
+US_pop$deaths_per_county<- (US_pop$deaths/US_pop$Population)*100 ## deaths per population
+
+
+glimpse(US_pop) ### we can only focus on US, so can filter out the rest
+US_pop<- US_pop %>% filter(Country_Region=="US")
+US_pop<- US_pop[complete.cases(US_pop),] ### there was a lot of missing data with pop density or population, so let's just deal with compelte cases
+
+US_pop %>% select(county, state, fatality_rate, cases_per_county, deaths_per_county) %>%
+  arrange(deaths_per_county) ### fewest deaths per county
+US_pop %>% select(county, state, fatality_rate, cases_per_county, deaths_per_county) %>%
+  arrange(desc(deaths_per_county)) ### most deaths per county
+
+US_pop %>% select(county, state, fatality_rate, cases_per_county, deaths_per_county) %>%
+  arrange(fatality_rate) ### lowest fatality rate
+US_pop %>% select(county, state, fatality_rate, cases_per_county, deaths_per_county) %>%
+  arrange(desc(fatality_rate)) ### highest fatality rate
+
+```
+```{r averages by state}
+by_state <- US_pop %>% group_by(state)
+avgs <- summarise(by_state,
+  num_counties = n(),
+  avg_cases = mean(cases_per_county, na.rm = TRUE),
+  avg_deaths = mean(deaths_per_county, na.rm = TRUE),
+  avg_fatality_rate = mean(fatality_rate, na.rm = TRUE))
+
+avgs %>% arrange(desc(avg_fatality_rate)) ## highest fatality rates by state
+
+avgs %>% arrange(avg_fatality_rate) ## lowest fatality rates by state
+```
+
+```{r plot by state}
+avgs %>% 
+  filter(avg_cases > 0) %>%
+  ggplot(aes(x = state, y = avg_cases)) +
+  geom_point(aes(color = "average cases")) +
+  geom_point(aes(y = avg_deaths, color = "average deaths")) +
+    scale_y_log10() +
+    theme(legend.position="bottom",
+          axis.text.x = element_text(angle = 90)) +
+  labs(title = "COVID19 in US", y= NULL)
+
+```
+```{r means by urban vs rural}
+by_urb <- US_pop %>% group_by(urb_vs_rural)
+avgs_urb <- summarise(by_urb,
+  num_counties = n(),
+  avg_cases = mean(cases_per_county, na.rm = TRUE),
+  avg_deaths = mean(deaths_per_county, na.rm = TRUE),
+  avg_fatality_rate = mean(fatality_rate, na.rm = TRUE))
+
+avgs_urb<- avgs_urb %>% pivot_longer(
+  cols = starts_with("avg"), 
+  names_to = "var", 
+  values_to = "rate")
+```
+
+```{r}
+ggplot(avgs_urb,aes(x=var,y=rate,fill=factor(urb_vs_rural)))+
+  geom_bar(stat="identity",position="dodge")+
+  xlab("COVID-19 cases, deaths and fatality percentage by urbanicity")+ylab("Mean Percentage") + scale_fill_discrete(name = "Urbanicity", labels = c("Rural", "Urban"))
+```
+
+*Cases per county*
+```{r cases}
+summary(lmer(cases_per_county~pop_density+ (1|state), US_pop))
+```
+
+*Deaths per county*
+```{r deaths}
+summary(lmer(deaths_per_county~pop_density + (1|state), data = US_pop))
+```
+
+*Case fatality rate*
+```{r fatality}
+summary(lmer(fatality_rate~pop_density + (1|state), US_pop))
+```
+
+```{r interaction of cases and population density}
+summary(lmer(deaths_per_county~cases_per_county+pop_density+cases_per_county*pop_density + (1|state), data=US_pop))
+```
+
+
+```{r plotting pop dens interaction}
+ggplot(US_pop,aes(cases_per_county, deaths_per_county, color=pop_density, na.rm = T)) +
+  facet_wrap(~ urb_vs_rural)+
+  geom_point(size = 2, alpha = .75, position = "jitter", na.rm = T) +
+  geom_smooth(na.rm = T, method = "lm", se = F, linetype = 1)+
+  theme_bw()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+```
+
+
+**Conclusion:**
+
+The three main statistical findings are: population density does not significantly predict COVID cases, but it does significantly predit COVID deaths and fatality rates. We controlled for any non-independence by state that could arise due to to state-wide laws such as mask mandates, shut downs, etc. 
+
+I found that as as population density increases, COVID case percentage per population *decreases* by a small and insignificant amount. This means that case percentage is actually slightly smaller for more densely populated areas, but again, insignificantly. As population density increases, death percentage per population also decreases, but by a more significant amount. Lastly, and as expected given the first two results, as population density increases, fatality rate also significantly decreases. As somewhat of a check on the data, I ran and plotted a model where percent of COVID cases per county and population density predict percent of COVID deaths per county. COVID cases per county do significantly predict deaths per county, but there was no significant interaction of population density on that relationship, perhaps because I had already controlled for population size in the variables. 
+
+These results are somewhat contrary to what I hypothesized. Here, worse COVID outcomes (deaths) seem overall better in more densely populated areas, but population density did not make a difference on cases per county. Better COVID outcomes in densley populated areas could be due to a number of factors not modelled here, such as socio economic status, better hospital systems, political beliefs or vaccine status. 
+
+**Limitations/ bias:**
+
+Limitations of this analysis come from using publicly available data. It is a huge benefit that NYT publishes data like this for our own use and transparency, but since we aren't collecting it we cannot always model the ideal variables. Further, sources of bias can come from my own beliefs, such as thinking more rural places do have less progressive views on the pandemic overall. We can also get bias from the data by not knowing how many tests were being administered each day in each county, which is something that can obviously highly skew the data. 
